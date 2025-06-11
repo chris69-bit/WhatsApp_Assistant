@@ -1,32 +1,71 @@
-from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
-import pickle
+# app.py
+from assistant import assistant_response
+from flask import Flask, request, jsonify
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
+import os
 
 app = Flask(__name__)
 
-# Load the assistant model
-with open('whatsapp_assitant-3.0.pkl', 'rb') as f:
-    assistant = pickle.load(f)
+# Initialize Google services
+def initialize_services():
+    creds = get_credentials()
+    
+    calendar_service = build('calendar', 'v3', credentials=creds)
+    gmail_service = build('gmail', 'v1', credentials=creds)
+    
+    # Get API keys
+    api_key = os.getenv('GOOGLE_API_KEY')
+    news_api_key = os.getenv('NEWS_API_KEY')
+    
+    return {
+        'calendar': calendar_service,
+        'gmail': gmail_service,
+        'google_api_key': api_key,
+        'news_api_key': news_api_key
+    }
 
+def get_credentials():
+    SCOPES = [
+        'https://www.googleapis.com/auth/calendar',
+        'https://www.googleapis.com/auth/gmail.readonly'
+    ]
+    creds = None
+
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+
+    return creds
+
+# Initialize services at startup
+services = initialize_services()
+
+# WhatsApp webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Get incoming message from WhatsApp
-    incoming_msg = request.values.get('Body', '').lower()
+    data = request.get_json()
+    user_message = data.get('message', '')
     
-    # Get sender's number
-    sender = request.values.get('From', '')
+    # Get assistant response
+    assistant_reply = assistant_response(user_message, services)
     
-    # Process the message with the assistant
-    try:
-        response_text = assistant.assistant_response(incoming_msg)
-    except Exception as e:
-        response_text = f"Sorry, I encountered an error: {str(e)}"
-    
-    # Create Twilio response
-    resp = MessagingResponse()
-    resp.message(response_text)
-    
-    return str(resp)
+    return jsonify({
+        'reply': assistant_reply,
+        'status': 'success'
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
